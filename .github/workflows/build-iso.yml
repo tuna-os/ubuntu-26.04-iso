@@ -1,0 +1,183 @@
+name: Build and Publish Ubuntu 26.04 Live ISO
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ubuntu-26.04/**'
+      - 'justfile'
+      - '.github/workflows/build-iso.yml'
+  schedule:
+    # Rebuild weekly on Monday at 03:00 UTC to pick up Ubuntu image updates
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      skip_upload:
+        description: 'Build ISO but skip uploading to R2 (dry run)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-and-publish:
+    name: Build Ubuntu 26.04 Live ISO
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+
+      - name: Mount BTRFS for podman storage
+        env:
+          BTRFS_LOOPBACK_FREE: "0.95"
+        run: bash .github/scripts/mount_btrfs.sh
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y just podman rclone mtools xorriso squashfs-tools
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull Ubuntu base image
+        run: |
+          podman pull ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest
+
+      - name: Build Live ISO
+        run: |
+          sudo just output_dir=output iso-sd-boot ubuntu-26.04
+
+      - name: Compute ISO name
+        id: iso
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "dated=ubuntu-26.04-live-${DATE}-${SHA}.iso" >> "$GITHUB_OUTPUT"
+          echo "path=output/ubuntu-26.04-live.iso" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ISO to Cloudflare R2
+        if: ${{ inputs.skip_upload != true && github.event_name != 'pull_request' }}
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_REGION: auto
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          ISO="${{ steps.iso.outputs.path }}"
+          DATED="${{ steps.iso.outputs.dated }}"
+          BUCKET="${{ secrets.R2_BUCKET }}"
+
+          echo "==> Uploading as $DATED ..."
+          rclone copyto --log-level INFO --checksum --s3-no-check-bucket \
+            "$ISO" "R2:${BUCKET}/ubuntu-26.04/${DATED}"
+
+          echo "==> Updating ubuntu-26.04-live-latest.iso ..."
+          rclone copyto --log-level INFO --s3-no-check-bucket \
+            "$ISO" "R2:${BUCKET}/ubuntu-26.04/ubuntu-26.04-live-latest.iso"
+
+          echo "==> Done. Public URL:"
+          echo "    https://download.tunaos.org/ubuntu-26.04/ubuntu-26.04-live-latest.iso"
+
+      - name: Boot verification (UEFI + serial)
+        timeout-minutes: 10
+        run: |
+          sudo apt-get install -y qemu-system-x86 ovmf socat imagemagick -qq
+
+          ISO="${{ steps.iso.outputs.path }}"
+          echo "==> Booting $ISO ..."
+
+          OVMF_CODE=""
+          for f in /usr/share/OVMF/OVMF_CODE_4M.fd \
+                   /usr/share/OVMF/OVMF_CODE.fd \
+                   /usr/share/edk2/ovmf/OVMF_CODE.fd; do
+            [ -f "$f" ] && OVMF_CODE="$f" && break
+          done
+          OVMF_VARS=""
+          for f in /usr/share/OVMF/OVMF_VARS_4M.fd \
+                   /usr/share/OVMF/OVMF_VARS.fd \
+                   /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+            if [ -f "$f" ]; then
+              cp "$f" /tmp/OVMF_VARS.fd
+              OVMF_VARS="/tmp/OVMF_VARS.fd"
+              break
+            fi
+          done
+
+          PFLASH=()
+          if [ -n "$OVMF_CODE" ] && [ -n "$OVMF_VARS" ]; then
+            echo "==> UEFI firmware: $OVMF_CODE"
+            PFLASH+=(-drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE")
+            PFLASH+=(-drive "if=pflash,format=raw,file=$OVMF_VARS")
+          fi
+
+          sudo qemu-system-x86_64 \
+            -machine type=q35,accel=kvm \
+            -cpu host -m 4G -smp 2 \
+            -cdrom "$ISO" -boot d \
+            "${PFLASH[@]}" \
+            -monitor unix:/tmp/qemu-monitor.sock,server,nowait \
+            -serial file:/tmp/serial.log \
+            -display none \
+            -daemonize
+
+          # Wait for monitor socket
+          for i in $(seq 1 30); do
+            [ -S /tmp/qemu-monitor.sock ] && break
+            sleep 2
+          done
+
+          # Wait for the live-ready.service marker (unique token printed to serial)
+          echo "==> Waiting up to 5 minutes for UBUNTU26_LIVE_READY marker..."
+          for i in $(seq 1 60); do
+            if grep -q "UBUNTU26_LIVE_READY" /tmp/serial.log 2>/dev/null; then
+              echo "==> Live desktop ready after $((i * 5))s"
+              break
+            fi
+            [ "$i" -eq 60 ] && echo "WARNING: ready marker not seen after 5m" || true
+            sleep 5
+          done
+
+          # Capture screenshot
+          echo "screendump /tmp/screenshot.ppm" | \
+            sudo socat - UNIX-CONNECT:/tmp/qemu-monitor.sock || true
+          sleep 2
+          if sudo test -f /tmp/screenshot.ppm; then
+            sudo convert /tmp/screenshot.ppm screenshot.png 2>/dev/null || \
+              sudo cp /tmp/screenshot.ppm screenshot.png
+            echo "==> Screenshot saved"
+          fi
+
+          echo "quit" | sudo socat - UNIX-CONNECT:/tmp/qemu-monitor.sock || true
+
+          grep -q "UBUNTU26_LIVE_READY" /tmp/serial.log || \
+            { echo "ERROR: live desktop did not start"; tail -80 /tmp/serial.log; exit 1; }
+
+      - name: Upload ISO as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.iso.outputs.dated }}
+          path: output/ubuntu-26.04-live.iso
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload boot screenshot as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: boot-screenshot
+          path: screenshot.png
+          if-no-files-found: warn

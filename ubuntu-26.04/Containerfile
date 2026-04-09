@@ -1,0 +1,42 @@
+# Ubuntu 26.04 Resolute Raccoon live ISO installer image
+#
+# Build with:
+#   just container ubuntu-26.04
+#
+# Two-stage build:
+#   1. ubuntu-ref   — Ubuntu 26.04 bootc image (provides kernel modules)
+#   2. final        — Ubuntu 26.04: builds dmsquash-live initramfs natively,
+#                     sets up live environment (liveuser, GDM3 autologin, etc.)
+#
+# Ubuntu ships dracut, so the initramfs can be built in-place without a
+# separate Debian builder stage.  The live initramfs replaces the bootc one.
+
+# ── Stage 1: Ubuntu reference (kernel modules source) ────────────────────────
+FROM ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest AS ubuntu-ref
+
+# ── Stage 2: Final Ubuntu live image ─────────────────────────────────────────
+FROM ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest
+
+ARG DEBUG=0
+ENV DEBUG=${DEBUG}
+
+# Replace the bootc initramfs with a dmsquash-live capable one.
+# The base image ships dracut config that adds the 'bootc' module for disk-boot;
+# remove it before building the live initramfs so it doesn't conflict with
+# dmsquash-live's rootfs discovery.  All needed modules are listed explicitly.
+RUN set -ex; \
+    rm -f /usr/lib/dracut/dracut.conf.d/30-ubuntu-bootc-container-build.conf \
+           /usr/lib/dracut/dracut.conf.d/30-ubuntu-bootc-fix-paths.conf; \
+    kernel=$(ls /usr/lib/modules | sort -V | tail -1); \
+    echo "Building dmsquash-live initramfs for kernel ${kernel}"; \
+    DRACUT_NO_XATTR=1 dracut -v --force --zstd --reproducible --no-hostonly \
+        --systemdsystemconfdir=/etc/systemd/system \
+        --systemdsystemunitdir=/usr/lib/systemd/system \
+        --add "dmsquash-live" \
+        --add-drivers "squashfs overlay loop iso9660 sr_mod cdrom" \
+        "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"; \
+    ls -lh "/usr/lib/modules/${kernel}/initramfs.img"
+
+# ── Live-environment configure layer ─────────────────────────────────────────
+COPY src/ /tmp/src/
+RUN chmod +x /tmp/src/configure-live.sh && /tmp/src/configure-live.sh
