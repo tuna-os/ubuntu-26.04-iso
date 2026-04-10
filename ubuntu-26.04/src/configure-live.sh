@@ -75,7 +75,8 @@ echo 'liveuser ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/liveuser
 chmod 0440 /etc/sudoers.d/liveuser
 
 # Skip gnome-initial-setup in the live session
-mkdir -p /home/liveuser/.config
+# usermod -m may have already moved /home/ubuntu -> /home/liveuser with .config intact
+mkdir -p /home/liveuser/.config || true
 touch /home/liveuser/.config/gnome-initial-setup-done
 chown -R liveuser:liveuser /home/liveuser/.config
 
