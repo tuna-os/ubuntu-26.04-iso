@@ -243,6 +243,24 @@ polkit.addRule(function(action, subject) {
 });
 EOF
 
+# ── ZFS install helper ────────────────────────────────────────────────────────
+# Drop the ZFS root installer script into the live image so users and tuna-installer
+# can invoke it for ZFS-root installs.  Also create a desktop entry for quick access.
+install -m 755 "$SCRIPT_DIR/zfs-install.sh" /usr/local/bin/zfs-install
+
+mkdir -p /usr/share/applications
+cat > /usr/share/applications/zfs-install.desktop << 'ZFSEOF'
+[Desktop Entry]
+Name=Install to ZFS
+Comment=Install Ubuntu 26.04 with ZFS root filesystem
+Exec=bash -c 'zenity --info --text="Run: sudo zfs-install /dev/sdX" --title="ZFS Install" || xterm -e "sudo zfs-install --help; bash"'
+Icon=drive-harddisk
+Terminal=false
+Type=Application
+Categories=System;
+NoDisplay=true
+ZFSEOF
+
 # ── Live-ready marker service ─────────────────────────────────────────────────
 # Prints a unique token to the serial console after the display manager starts.
 # CI greps for this token to confirm the live session reached the desktop.

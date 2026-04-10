@@ -31,7 +31,7 @@ RUN set -ex; \
     kernel=$(ls /usr/lib/modules | sort -V | tail -1); \
     echo "Building dmsquash-live initramfs for kernel ${kernel}"; \
     DRACUT_NO_XATTR=1 dracut -v --force --zstd --reproducible --no-hostonly \
-        --add "dmsquash-live" \
+        --add "dmsquash-live zfs" \
         --add-drivers "squashfs overlay loop iso9660 sr_mod cdrom" \
         "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"; \
     ls -lh "/usr/lib/modules/${kernel}/initramfs.img"
