@@ -12,8 +12,13 @@ set -exo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Live user ─────────────────────────────────────────────────────────────────
-useradd --create-home --uid 1000 --user-group \
-    --comment "Live User" liveuser || true
+# ubuntu-desktop-minimal pre-creates an 'ubuntu' user at UID 1000; rename it.
+if id ubuntu &>/dev/null; then
+    usermod -l liveuser -d /home/liveuser -m -c "Live User" ubuntu
+    groupmod -n liveuser ubuntu
+elif ! id liveuser &>/dev/null; then
+    useradd --create-home --uid 1000 --user-group --comment "Live User" liveuser
+fi
 passwd --delete liveuser
 
 # Debug builds: set password and enable SSH for testing
