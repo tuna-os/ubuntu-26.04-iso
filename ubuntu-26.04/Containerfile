@@ -30,8 +30,6 @@ RUN set -ex; \
     kernel=$(ls /usr/lib/modules | sort -V | tail -1); \
     echo "Building dmsquash-live initramfs for kernel ${kernel}"; \
     DRACUT_NO_XATTR=1 dracut -v --force --zstd --reproducible --no-hostonly \
-        --systemdsystemconfdir=/etc/systemd/system \
-        --systemdsystemunitdir=/usr/lib/systemd/system \
         --add "dmsquash-live" \
         --add-drivers "squashfs overlay loop iso9660 sr_mod cdrom" \
         "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}"; \
