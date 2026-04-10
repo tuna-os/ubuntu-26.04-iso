@@ -37,12 +37,8 @@ RUN set -ex; \
     ls -lh "/usr/lib/modules/${kernel}/initramfs.img"
 
 # ── Live-environment configure layer ─────────────────────────────────────────
-# Install flatpak + build-time deps for install-flatpaks.sh.
-# The base image may predate the flatpak addition; install unconditionally here.
-RUN --mount=type=tmpfs,dst=/tmp \
-    apt-get update -y && \
-    apt-get install -y flatpak dbus rsync && \
-    apt-get clean -y && rm -rf /var/lib/apt/lists/*
+# Note: flatpak, dbus, rsync come from the base bootc image — we cannot
+# apt-get install here because bootc-rootfs.sh wipes /var/lib/dpkg.
 
 COPY src/ /tmp/src/
 RUN chmod +x /tmp/src/configure-live.sh && /tmp/src/configure-live.sh
