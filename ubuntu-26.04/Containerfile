@@ -12,10 +12,10 @@
 # separate Debian builder stage.  The live initramfs replaces the bootc one.
 
 # ── Stage 1: Ubuntu reference (kernel modules source) ────────────────────────
-FROM ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest AS ubuntu-ref
+FROM localhost/ubuntu-26.04-desktop-bootc:latest AS ubuntu-ref
 
 # ── Stage 2: Final Ubuntu live image ─────────────────────────────────────────
-FROM ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest
+FROM localhost/ubuntu-26.04-desktop-bootc:latest
 
 ARG DEBUG=0
 ENV DEBUG=${DEBUG}
