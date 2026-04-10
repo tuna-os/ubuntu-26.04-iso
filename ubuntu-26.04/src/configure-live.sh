@@ -16,13 +16,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   /home  -> var/home
 #   /usr/local -> ../var/usrlocal
 # Recreate them so subsequent mkdir/useradd calls don't fail.
-mkdir -p /var/home /var/usrlocal
+mkdir -p /var/home /var/usrlocal/bin /var/usrlocal/share/applications /var/usrlocal/share/icons
 
 # ── Live user ─────────────────────────────────────────────────────────────────
-# bootc-rootfs.sh wipes /var; /home -> var/home but /var/home doesn't exist yet.
 # ubuntu-desktop-minimal pre-creates an 'ubuntu' user at UID 1000 with a
 # dangling home (/var/home/ubuntu). Delete it and create liveuser cleanly.
-mkdir -p /var/home
 userdel ubuntu 2>/dev/null || true
 groupdel ubuntu 2>/dev/null || true
 useradd --create-home --base-dir /var/home --uid 1000 --user-group \
