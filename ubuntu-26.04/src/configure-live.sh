@@ -12,13 +12,14 @@ set -exo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Live user ─────────────────────────────────────────────────────────────────
-# ubuntu-desktop-minimal pre-creates an 'ubuntu' user at UID 1000; rename it.
-if id ubuntu &>/dev/null; then
-    usermod -l liveuser -d /home/liveuser -m -c "Live User" ubuntu
-    groupmod -n liveuser ubuntu
-elif ! id liveuser &>/dev/null; then
-    useradd --create-home --uid 1000 --user-group --comment "Live User" liveuser
-fi
+# bootc-rootfs.sh wipes /var; /home -> var/home but /var/home doesn't exist yet.
+# ubuntu-desktop-minimal pre-creates an 'ubuntu' user at UID 1000 with a
+# dangling home (/var/home/ubuntu). Delete it and create liveuser cleanly.
+mkdir -p /var/home
+userdel ubuntu 2>/dev/null || true
+groupdel ubuntu 2>/dev/null || true
+useradd --create-home --base-dir /var/home --uid 1000 --user-group \
+    --comment "Live User" --shell /bin/bash liveuser
 passwd --delete liveuser
 
 # Debug builds: set password and enable SSH for testing
