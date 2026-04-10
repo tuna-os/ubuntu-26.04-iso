@@ -112,6 +112,9 @@ iso-sd-boot target:
         mkdir -p \"\${SQUASHFS_ROOT}\"
         cp -a --reflink=auto \"\${MOUNT}/.\" \"\${SQUASHFS_ROOT}/\" 2>/dev/null || \
             cp -a \"\${MOUNT}/.\" \"\${SQUASHFS_ROOT}/\"
+        # bootc ships /usr/lib/bootc/storage as a symlink into /sysroot; replace
+        # it with a real directory so we can embed the offline OCI store.
+        rm -f \"\${SQUASHFS_ROOT}/usr/lib/bootc/storage\"
         mkdir -p \"\${SQUASHFS_ROOT}/usr/lib/bootc/storage\"
         cp -a \"\${CS_STAGING}/usr/lib/bootc/storage/.\" \
             \"\${SQUASHFS_ROOT}/usr/lib/bootc/storage/\"
