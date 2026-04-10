@@ -25,6 +25,7 @@ ENV DEBUG=${DEBUG}
 # remove it before building the live initramfs so it doesn't conflict with
 # dmsquash-live's rootfs discovery.  All needed modules are listed explicitly.
 RUN set -ex; \
+    mkdir -p /var/tmp; \
     rm -f /usr/lib/dracut/dracut.conf.d/30-ubuntu-bootc-container-build.conf \
            /usr/lib/dracut/dracut.conf.d/30-ubuntu-bootc-fix-paths.conf; \
     kernel=$(ls /usr/lib/modules | sort -V | tail -1); \
