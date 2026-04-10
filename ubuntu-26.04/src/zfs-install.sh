@@ -167,7 +167,7 @@ info "Installing '${IMGREF}'..."
 
 bootc install to-filesystem \
     --source-imgref "${IMGREF}" \
-    --karg "root=ZFS=${POOL_NAME}/root" \
+    --root-mount-spec "ZFS=${POOL_NAME}/root" \
     --karg "rootfstype=zfs" \
     --karg "spl_hostid=0x${HOSTID_HEX}" \
     /mnt/target
@@ -203,5 +203,5 @@ zpool export "${POOL_NAME}"
 trap - EXIT
 
 info ""
-info "Done! Boot entry kargs: root=ZFS=${POOL_NAME}/root rootfstype=zfs spl_hostid=0x${HOSTID_HEX}"
+info "Done! Boot entry: root-mount-spec=ZFS=${POOL_NAME}/root rootfstype=zfs spl_hostid=0x${HOSTID_HEX}"
 info "Remove the live media and reboot."
