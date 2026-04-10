@@ -11,6 +11,13 @@ set -exo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── Restore /var subdirs wiped by bootc-rootfs.sh ─────────────────────────────
+# bootc-rootfs.sh wipes /var entirely. Several symlinks point into /var:
+#   /home  -> var/home
+#   /usr/local -> ../var/usrlocal
+# Recreate them so subsequent mkdir/useradd calls don't fail.
+mkdir -p /var/home /var/usrlocal
+
 # ── Live user ─────────────────────────────────────────────────────────────────
 # bootc-rootfs.sh wipes /var; /home -> var/home but /var/home doesn't exist yet.
 # ubuntu-desktop-minimal pre-creates an 'ubuntu' user at UID 1000 with a
