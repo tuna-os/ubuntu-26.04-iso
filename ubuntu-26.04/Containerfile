@@ -38,5 +38,21 @@ RUN set -ex; \
     ls -lh "/usr/lib/modules/${kernel}/initramfs.img"
 
 # ── Live-environment configure layer ─────────────────────────────────────────
+# Install flatpak + build-time deps for install-flatpaks.sh.
+# The base image may predate the flatpak addition; install unconditionally here.
+RUN --mount=type=tmpfs,dst=/tmp --mount=type=tmpfs,dst=/root \
+    apt-get update -y && \
+    apt-get install -y flatpak dbus rsync && \
+    apt-get clean -y && rm -rf /var/lib/apt/lists/*
+
 COPY src/ /tmp/src/
 RUN chmod +x /tmp/src/configure-live.sh && /tmp/src/configure-live.sh
+
+ARG INSTALLER_CHANNEL=stable
+ENV INSTALLER_CHANNEL=${INSTALLER_CHANNEL}
+
+# ── Flatpak install layer ─────────────────────────────────────────────────────
+# --mount=type=cache persists the ostree flatpak repo across local builds so
+# only deltas are downloaded on rebuild.  CI always starts cold.
+RUN --mount=type=cache,target=/var/cache/flatpak-dl,id=ubuntu2604-flatpak \
+    chmod +x /tmp/src/install-flatpaks.sh && /tmp/src/install-flatpaks.sh

@@ -4,12 +4,12 @@
 # Runs inside the final Ubuntu container stage with:
 #   --cap-add sys_admin --security-opt label=disable
 #
-# At this point the dmsquash-live initramfs has already been built (in the
-# Containerfile RUN step before this script).  This script handles the runtime
-# live environment: liveuser, GDM3 autologin, dconf, tmpfs, VFS storage config,
-# and skopeo/podman wrappers for offline bootc install support.
+# Handles: liveuser, GDM3 autologin, dconf, AppArmor masking, tmpfs,
+# tuna-installer autostart + polkit, VFS storage config, skopeo wrapper.
 
 set -exo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Live user ─────────────────────────────────────────────────────────────────
 useradd --create-home --uid 1000 --user-group \
@@ -94,6 +94,10 @@ system-db:local
 PROFILEEOF
 
 cat > /etc/dconf/db/local.d/50-live-iso << 'DCONFEOF'
+[org/gnome/shell]
+welcome-dialog-last-shown-version='999'
+favorite-apps=['ubuntu-installer.desktop', 'org.mozilla.firefox.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Console.desktop']
+
 [org/gnome/desktop/screensaver]
 lock-enabled=false
 idle-activation-enabled=false
@@ -110,6 +114,7 @@ power-button-action='nothing'
 DCONFEOF
 
 cat > /etc/dconf/db/local.d/locks/50-live-iso << 'LOCKSEOF'
+/org/gnome/shell/favorite-apps
 /org/gnome/desktop/screensaver/lock-enabled
 /org/gnome/desktop/screensaver/idle-activation-enabled
 /org/gnome/desktop/session/idle-delay
@@ -152,34 +157,91 @@ mkdir -p /var/fisherman-tmp
 mkdir -p /usr/lib/tmpfiles.d
 echo 'f /etc/hostname 0644 - - - ubuntu-live' > /usr/lib/tmpfiles.d/live-hostname.conf
 
-# ── Polkit: allow liveuser to run pkexec without password ─────────────────────
-# Lets liveuser run `sudo bootc install to-disk` without a password prompt.
+# ── tuna-installer desktop entry override ────────────────────────────────────
+INSTALLER_APP_ID="org.bootcinstaller.Installer"
+[[ "${INSTALLER_CHANNEL:-stable}" == "dev" ]] && INSTALLER_APP_ID="org.bootcinstaller.Installer.Devel"
+
+mkdir -p /usr/local/share/applications
+cat > /usr/local/share/applications/${INSTALLER_APP_ID}.desktop << DESKTOPEOF
+[Desktop Entry]
+Name=Ubuntu Installer
+Exec=/usr/bin/flatpak run --env=VANILLA_CUSTOM_RECIPE=/run/host/etc/bootc-installer/recipe.json ${INSTALLER_APP_ID}
+Icon=distributor-logo-ubuntu
+Terminal=false
+Type=Application
+Categories=GTK;System;Settings;
+StartupNotify=true
+X-Flatpak=${INSTALLER_APP_ID}
+DESKTOPEOF
+
+mkdir -p /usr/share/applications
+cat > /usr/share/applications/ubuntu-installer.desktop << DTEOF
+[Desktop Entry]
+Name=Ubuntu Installer
+Comment=Install Ubuntu 26.04 to your computer
+Exec=flatpak run --env=VANILLA_CUSTOM_RECIPE=/run/host/etc/bootc-installer/recipe.json ${INSTALLER_APP_ID}
+Icon=distributor-logo-ubuntu
+Type=Application
+Categories=System;
+NoDisplay=false
+DTEOF
+
+# ── Installer configuration ───────────────────────────────────────────────────
+mkdir -p /etc/bootc-installer
+cp "$SCRIPT_DIR/etc/bootc-installer/images.json" /etc/bootc-installer/images.json
+cp "$SCRIPT_DIR/etc/bootc-installer/recipe.json" /etc/bootc-installer/recipe.json
+touch /etc/bootc-installer/live-iso-mode
+
+# ── Installer autostart ───────────────────────────────────────────────────────
+mkdir -p /etc/xdg/autostart
+cat > /etc/xdg/autostart/tuna-installer.desktop << DTEOF
+[Desktop Entry]
+Name=Ubuntu Installer
+Exec=flatpak run --env=VANILLA_CUSTOM_RECIPE=/run/host/etc/bootc-installer/recipe.json ${INSTALLER_APP_ID}
+Icon=distributor-logo-ubuntu
+Type=Application
+X-GNOME-Autostart-enabled=true
+DTEOF
+
+# ── Polkit rules for live installer ──────────────────────────────────────────
+INSTALLER_APP_DIR=$(find /var/lib/flatpak/app/${INSTALLER_APP_ID} -name fisherman -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+if [ -n "$INSTALLER_APP_DIR" ]; then
+    mkdir -p /usr/local/bin
+    ln -sf "${INSTALLER_APP_DIR}/fisherman" /usr/local/bin/fisherman
+fi
+
+mkdir -p /usr/share/polkit-1/actions
+cat > /usr/share/polkit-1/actions/org.bootcinstaller.Installer.policy << 'POLICYEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.tunaos.Installer.install">
+    <description>Install an operating system to disk</description>
+    <message>Authentication is required to install an operating system</message>
+    <icon_name>drive-harddisk</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/fisherman</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+POLICYEOF
+
 mkdir -p /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/99-live-installer.rules << 'EOF'
 polkit.addRule(function(action, subject) {
-    if (action.id === "org.freedesktop.policykit.exec" &&
+    if ((action.id === "org.freedesktop.policykit.exec" ||
+         action.id === "org.tunaos.Installer.install") &&
             subject.user === "liveuser" && subject.local) {
         return polkit.Result.YES;
     }
 });
 EOF
-
-# ── Install instructions on the desktop ───────────────────────────────────────
-# Drop a README on liveuser's desktop so it's immediately visible
-mkdir -p /home/liveuser/Desktop
-cat > /home/liveuser/Desktop/INSTALL.txt << 'READMEEOF'
-Ubuntu 26.04 Live (Resolute Raccoon)
-=====================================
-
-To install to disk, open a terminal and run:
-
-  sudo bootc install to-disk --source-imgref ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest /dev/sda
-
-Replace /dev/sda with your target drive. Requires internet access.
-
-WARNING: This will erase the target drive completely.
-READMEEOF
-chown -R liveuser:liveuser /home/liveuser/Desktop
 
 # ── Live-ready marker service ─────────────────────────────────────────────────
 # Prints a unique token to the serial console after the display manager starts.
