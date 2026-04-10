@@ -149,7 +149,7 @@ iso-sd-boot target:
 boot-iso-serial target:
     #!/usr/bin/bash
     set -euo pipefail
-    ISO="${{output_dir}}/{{target}}-live.iso"
+    ISO="{{output_dir}}/{{target}}-live.iso"
     if [[ ! -f "$ISO" ]]; then
         echo "No ISO found — run: just iso-sd-boot {{target}}" >&2
         exit 1
@@ -221,7 +221,7 @@ boot-libvirt-debug target:
     VM_CPUS=4
     DISK_SIZE=64
 
-    ISO="${{output_dir}}/{{target}}-live.iso"
+    ISO="{{output_dir}}/{{target}}-live.iso"
     if [[ ! -f "$ISO" ]]; then
         echo "No ISO found — build first with: just debug=1 iso-sd-boot {{target}}" >&2
         exit 1
