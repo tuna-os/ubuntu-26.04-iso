@@ -1,12 +1,40 @@
 # Ubuntu 26.04 live ISO — system Flatpak applications
 #
-# These are installed into the live squashfs at build time and copied
-# to the installed system by tuna-installer (CopyFlatpaks).
+# Mirrors the app set that ubuntu-desktop adds on top of ubuntu-desktop-minimal,
+# delivered as Flatpaks instead of debs so they install cleanly onto the
+# composefs read-only sysroot and are copied to the installed system by
+# tuna-installer (CopyFlatpaks).
 #
-# Note: org.bootcinstaller.Installer is handled separately in
-# install-flatpaks.sh (GitHub Releases bundle, not on Flathub).
+# Already in ubuntu-desktop-minimal — NOT listed here:
+#   baobab, gnome-calculator, gnome-characters, gnome-clocks,
+#   gnome-control-center, gnome-disk-utility, gnome-font-viewer,
+#   gnome-text-editor, papers (doc viewer), ptyxis (terminal),
+#   resources (system monitor), seahorse
 #
-# LibreOffice ships as debs in the official Ubuntu 26.04 ISO but we deliver
-# it as a Flatpak so it lands cleanly on the installed composefs read-only
-# system without needing to touch the deb package layer.
+# Snaps (handled by src/snaps — NOT listed here):
+#   firefox, thunderbird, snap-store, firmware-updater
+#
+# No Flatpak available — skipped:
+#   usb-creator-gtk  (Ubuntu-specific USB creator, no Flatpak equivalent)
+#   gst-*-thumbnailer (system thumbnailer services, not user-facing apps)
+
+# Office
 org.libreoffice.LibreOffice
+
+# Productivity / utilities
+org.gnome.DejaDup
+org.gnome.FileRoller
+org.gnome.Calendar
+org.gnome.SimpleScan
+
+# Media
+org.gnome.Shotwell
+org.gnome.Showtime
+org.gnome.Music
+
+# Internet / network
+com.transmissionbt.Transmission
+org.remmina.Remmina
+
+# Camera
+org.gnome.Snapshot
