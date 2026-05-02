@@ -1,0 +1,165 @@
+name: End-to-End ISO Test
+
+# Tests the full Ubuntu 26.04 live ISO lifecycle:
+#   1. Build the ISO (debug=1 so SSH is available)
+#   2. Boot the live ISO in QEMU — wait for UBUNTU26_LIVE_READY marker
+#   3. Run fisherman install via SSH (ext4, systemd-boot, no LUKS)
+#   4. Boot the installed disk in QEMU — wait for login prompt
+#
+# Mirrors the local just recipes:
+#   just debug=1 e2e ubuntu-26.04
+#
+# Runs on every PR and weekly to catch regressions.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 2'   # Tuesday 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  e2e:
+    name: ISO End-to-End
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            just podman mtools xorriso isomd5sum squashfs-tools \
+            qemu-system-x86 ovmf socat sshpass \
+            python3 -qq
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Log in to GHCR (for base image pull)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull base bootc image
+        run: |
+          sudo podman pull ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest
+          sudo podman tag  ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest \
+                           localhost/ubuntu-26.04-desktop-bootc:latest
+
+      - name: Build debug ISO
+        id: build
+        run: |
+          START=$(date +%s)
+          sudo just debug=1 output_dir=/var/tmp/iso-output compression=fast \
+            iso-sd-boot ubuntu-26.04
+          echo "duration=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
+          ISO=/var/tmp/iso-output/ubuntu-26.04-live.iso
+          echo "iso_size=$(stat -c%s "$ISO" 2>/dev/null || echo 0)" >> "$GITHUB_OUTPUT"
+          ls -lh "$ISO"
+
+      - name: Boot live ISO (smoke test)
+        id: live_boot
+        run: |
+          START=$(date +%s)
+          sudo just output_dir=/var/tmp/iso-output test-live ubuntu-26.04
+          echo "duration=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
+
+      - name: Full install end-to-end
+        id: e2e
+        run: |
+          START=$(date +%s)
+          # e2e-qemu runs against the already-built ISO (no rebuild)
+          sudo just \
+            output_dir=/var/tmp/iso-output \
+            e2e-qemu ubuntu-26.04
+          echo "duration=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Upload serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-serial-logs
+          path: |
+            /tmp/ubuntu-26.04-e2e-live.log
+            /tmp/ubuntu-26.04-e2e-installed.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Post PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          LIVE_OUTCOME:  ${{ steps.live_boot.outcome }}
+          E2E_OUTCOME:   ${{ steps.e2e.outcome }}
+          BUILD_S:       ${{ steps.build.outputs.duration }}
+          LIVE_S:        ${{ steps.live_boot.outputs.duration }}
+          E2E_S:         ${{ steps.e2e.outputs.duration }}
+          ISO_BYTES:     ${{ steps.build.outputs.iso_size }}
+        with:
+          script: |
+            const live = process.env.LIVE_OUTCOME;
+            const e2e  = process.env.E2E_OUTCOME;
+            const pass = live === 'success' && e2e === 'success';
+            const icon = pass ? '✅' : '❌';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const fmtDur = s => s ? `${Math.floor(s/60)}m ${s%60}s` : 'N/A';
+            const fmtMiB = b => b ? `${(b/1024/1024).toFixed(0)} MiB` : 'N/A';
+            const body = [
+              `## ${icon} ISO End-to-End Test — ${pass ? 'PASSED' : 'FAILED'}`,
+              '',
+              '| Step | Result | Time |',
+              '|------|--------|------|',
+              `| ISO build          | ${process.env.BUILD_S ? '✅' : '⏳'} | ${fmtDur(process.env.BUILD_S)} |`,
+              `| Live boot          | ${live === 'success' ? '✅' : '❌'} ${live} | ${fmtDur(process.env.LIVE_S)} |`,
+              `| Install + reboot   | ${e2e  === 'success' ? '✅' : '❌'} ${e2e}  | ${fmtDur(process.env.E2E_S)} |`,
+              `| ISO size           | ${fmtMiB(process.env.ISO_BYTES)} | — |`,
+              '',
+              `Serial logs are attached to the [workflow run](${runUrl}).`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
+
+      - name: Job summary
+        if: always()
+        run: |
+          LIVE="${{ steps.live_boot.outcome }}"
+          E2E="${{ steps.e2e.outcome }}"
+          PASS=$( [[ "$LIVE" == "success" && "$E2E" == "success" ]] && echo "✅ PASSED" || echo "❌ FAILED" )
+          {
+            echo "## $PASS — ISO End-to-End Test"
+            echo ""
+            echo "| Step | Result | Time |"
+            echo "|------|--------|------|"
+            echo "| Build | ✅ | ${{ steps.build.outputs.duration }}s |"
+            echo "| Live boot | $LIVE | ${{ steps.live_boot.outputs.duration }}s |"
+            echo "| Install + reboot | $E2E | ${{ steps.e2e.outputs.duration }}s |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if e2e did not pass
+        if: steps.e2e.outcome != 'success'
+        run: |
+          echo "e2e test failed — check serial logs in artifacts"
+          exit 1

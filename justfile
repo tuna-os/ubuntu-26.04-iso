@@ -304,3 +304,299 @@ boot-libvirt-debug target:
     echo "  Cleanup: sudo virsh destroy ${VM_NAME}"
     echo "           sudo virsh undefine ${VM_NAME} --nvram"
     echo "════════════════════════════════════════"
+
+# ── QEMU e2e test ──────────────────────────────────────────────────────────────
+# Adapts the dakota-iso LUKS e2e pattern for a plain (non-LUKS) Ubuntu install.
+# The installed system is ext4 + systemd-boot; no passphrase unlock needed.
+#
+# Variables (all overridable on the command line):
+e2e-disk               := "/var/tmp/ubuntu-26.04-e2e.qcow2"
+e2e-ovmf-vars-live      := "/var/tmp/ubuntu-26.04-e2e-live-vars.fd"
+e2e-ovmf-vars-installed := "/var/tmp/ubuntu-26.04-e2e-installed-vars.fd"
+e2e-monitor-live        := "/tmp/ubuntu-26.04-e2e-live.sock"
+e2e-monitor-installed   := "/tmp/ubuntu-26.04-e2e-installed.sock"
+e2e-serial-live         := "/tmp/ubuntu-26.04-e2e-live.log"
+e2e-serial-installed    := "/tmp/ubuntu-26.04-e2e-installed.log"
+e2e-ssh-port            := "2222"
+
+# Live boot smoke test — fast, no install needed, does not require debug=1.
+# Boots the ISO in headless QEMU and waits for the UBUNTU26_LIVE_READY marker
+# emitted by live-ready.service once the display manager has started.
+# Usage: just test-live ubuntu-26.04
+test-live target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    ISO="{{output_dir}}/{{target}}-live.iso"
+    [[ -f "$ISO" ]] || { echo "No ISO — run: just iso-sd-boot {{target}}"; exit 1; }
+
+    QEMU=$(command -v /usr/libexec/qemu-kvm /usr/bin/qemu-kvm \
+               /usr/bin/qemu-system-x86_64 2>/dev/null | head -1)
+    [[ -z "$QEMU" ]] && { echo "qemu-kvm / qemu-system-x86_64 not found" >&2; exit 1; }
+
+    OVMF_CODE=""
+    for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+              /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd; do
+        [[ -f "$f" ]] && { OVMF_CODE="$f"; break; }
+    done
+    [[ -z "$OVMF_CODE" ]] && { echo "OVMF not found — install ovmf" >&2; exit 1; }
+    OVMF_VARS=$(mktemp /tmp/ubuntu-smoke-vars.XXXXXX.fd)
+    for f in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+              /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+        [[ -f "$f" ]] && { cp "$f" "$OVMF_VARS"; break; }
+    done
+
+    SERIAL=$(mktemp /tmp/ubuntu-smoke-serial.XXXXXX.log)
+    MONITOR=$(mktemp /tmp/ubuntu-smoke-monitor.XXXXXX.sock)
+    TIMEOUT=480   # 8 min — live env with snap seeding can be slow
+    trap "sudo socat - UNIX-CONNECT:$MONITOR <<< 'quit' 2>/dev/null || true; rm -f $OVMF_VARS $SERIAL" EXIT
+
+    echo "==> Booting live ISO (headless): $ISO"
+    sudo "$QEMU" \
+        -machine q35 -cpu host -m 4096 -smp 2 -accel kvm \
+        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+        -drive "if=pflash,format=raw,file=${OVMF_VARS}" \
+        -drive "if=none,id=iso,file=${ISO},media=cdrom,readonly=on,format=raw" \
+        -device virtio-scsi-pci,id=scsi \
+        -device scsi-cd,drive=iso \
+        -netdev "user,id=net0" \
+        -device virtio-net-pci,netdev=net0 \
+        -monitor "unix:${MONITOR},server,nowait" \
+        -serial "file:${SERIAL}" \
+        -display none \
+        -daemonize
+
+    echo "==> Waiting for UBUNTU26_LIVE_READY (timeout: ${TIMEOUT}s)..."
+    ELAPSED=0
+    while (( ELAPSED < TIMEOUT )); do
+        if grep -q "UBUNTU26_LIVE_READY" "$SERIAL" 2>/dev/null; then
+            echo ""
+            echo "=== LIVE SMOKE TEST PASSED (${ELAPSED}s) ==="
+            FAILS=$(grep -E '\[FAILED\] Failed to start|Kernel panic' "$SERIAL" || true)
+            [[ -n "$FAILS" ]] && echo "WARNING — failures in serial log:" && echo "$FAILS"
+            exit 0
+        fi
+        sleep 3; (( ELAPSED += 3 ))
+        printf "."
+    done
+    echo ""
+    echo "=== LIVE SMOKE TEST FAILED (timeout after ${TIMEOUT}s) ==="
+    echo "--- last 50 lines of serial ---"
+    tail -50 "$SERIAL" 2>/dev/null || true
+    exit 1
+
+# Full end-to-end: build ISO → boot live → fisherman install → boot installed.
+# Requires debug=1 so SSH is available in the live session.
+# Usage: just debug=1 e2e ubuntu-26.04
+e2e target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    if [[ "{{debug}}" != "1" ]]; then
+        echo "ERROR: e2e requires debug=1 (SSH is needed for the fisherman install step)"
+        echo "  Run: just debug=1 e2e {{target}}"
+        exit 1
+    fi
+    echo "=== Step 1: Build ISO (debug=1) ==="
+    just debug=1 output_dir={{output_dir}} compression={{compression}} iso-sd-boot {{target}}
+    echo "=== Step 2: QEMU end-to-end ==="
+    sudo rm -f "{{e2e-disk}}" \
+               "{{e2e-ovmf-vars-live}}" "{{e2e-ovmf-vars-installed}}" \
+               "{{e2e-monitor-live}}" "{{e2e-monitor-installed}}" \
+               "{{e2e-serial-live}}" "{{e2e-serial-installed}}"
+    just e2e-qemu {{target}}
+
+# Run the QEMU e2e test against an already-built ISO (skips the rebuild).
+# Expects the ISO at {{output_dir}}/{{target}}-live.iso.
+e2e-qemu target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    just e2e-boot-live      {{target}}
+    just e2e-install        {{target}}
+    just e2e-boot-installed {{target}}
+
+# Boot the live ISO in QEMU (daemonized) with a blank install disk attached.
+# Waits for UBUNTU26_LIVE_READY marker then polls SSH until the session is ready.
+e2e-boot-live target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    ISO="{{output_dir}}/{{target}}-live.iso"
+    [[ -f "$ISO" ]] || { echo "No ISO — run: just debug=1 iso-sd-boot {{target}}" >&2; exit 1; }
+
+    QEMU=$(command -v /usr/libexec/qemu-kvm /usr/bin/qemu-kvm \
+               /usr/bin/qemu-system-x86_64 2>/dev/null | head -1)
+    [[ -z "$QEMU" ]] && { echo "qemu-kvm / qemu-system-x86_64 not found" >&2; exit 1; }
+
+    OVMF_CODE=""
+    for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+              /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd; do
+        [[ -f "$f" ]] && { OVMF_CODE="$f"; break; }
+    done
+    [[ -z "$OVMF_CODE" ]] && { echo "OVMF not found" >&2; exit 1; }
+    for f in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+              /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+        [[ -f "$f" ]] && { cp "$f" "{{e2e-ovmf-vars-live}}"; break; }
+    done
+
+    [[ -f "{{e2e-disk}}" ]] || qemu-img create -f qcow2 "{{e2e-disk}}" 20G
+
+    echo "==> Booting live ISO: $ISO"
+    sudo "$QEMU" \
+        -machine q35 -cpu host -m 4096 -smp 2 -accel kvm \
+        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+        -drive "if=pflash,format=raw,file={{e2e-ovmf-vars-live}}" \
+        -drive "if=none,id=iso,file=${ISO},media=cdrom,readonly=on,format=raw" \
+        -device virtio-scsi-pci,id=scsi \
+        -device scsi-cd,drive=iso \
+        -drive "if=none,id=disk,file={{e2e-disk}},format=qcow2" \
+        -device virtio-blk-pci,drive=disk \
+        -netdev "user,id=net0,hostfwd=tcp::{{e2e-ssh-port}}-:22" \
+        -device virtio-net-pci,netdev=net0 \
+        -monitor "unix:{{e2e-monitor-live}},server,nowait" \
+        -serial "file:{{e2e-serial-live}}" \
+        -display none \
+        -daemonize
+    echo "==> Live QEMU started (monitor: {{e2e-monitor-live}})"
+
+    echo "==> Waiting for UBUNTU26_LIVE_READY (up to 8 min)..."
+    for i in $(seq 1 160); do
+        if grep -q "UBUNTU26_LIVE_READY" "{{e2e-serial-live}}" 2>/dev/null; then
+            echo " ready (${i} × 3s)"
+            break
+        fi
+        [[ "$i" -eq 160 ]] && {
+            echo "TIMEOUT: live env not ready after 8 min"
+            tail -40 "{{e2e-serial-live}}" || true
+            exit 1
+        }
+        sleep 3
+        printf "."
+    done
+
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o LogLevel=ERROR -o ConnectTimeout=5 -o PreferredAuthentications=password"
+    echo "==> Waiting for SSH on port {{e2e-ssh-port}}..."
+    for i in $(seq 1 40); do
+        sshpass -p live ssh $SSH_OPTS liveuser@127.0.0.1 \
+            -p {{e2e-ssh-port}} true 2>/dev/null && { echo "SSH ready"; break; }
+        [[ "$i" -eq 40 ]] && { echo "ERROR: SSH timed out"; exit 1; }
+        sleep 5
+    done
+
+# Run fisherman install via SSH into the live QEMU VM, then shut down.
+# The bootc payload image lives at /usr/lib/bootc/storage in the squashfs
+# (separate from the VFS store used for flatpaks at /var/lib/containers/storage).
+# We set CONTAINERS_STORAGE_CONF so fisherman + bootc find the image there.
+e2e-install target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o LogLevel=ERROR -o ConnectTimeout=10 -o PreferredAuthentications=password \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
+    SSH="sshpass -p live ssh $SSH_OPTS liveuser@127.0.0.1 -p {{e2e-ssh-port}}"
+    SCP="sshpass -p live scp $SSH_OPTS -P {{e2e-ssh-port}}"
+
+    # Write the fisherman recipe locally, then SCP it in
+    RECIPE=$(mktemp /tmp/ubuntu-e2e-recipe.XXXXXX.json)
+    trap "rm -f '$RECIPE'" EXIT
+    python3 -c "import json; print(json.dumps({
+        'disk':'/dev/vda','filesystem':'ext4','composeFsBackend':True,
+        'bootloader':'systemd','selinuxDisabled':True,'unifiedStorage':False,
+        'hostname':'ubuntu-e2e-test',
+        'image':'localhost/ubuntu-26.04-desktop-bootc:latest',
+        'flatpaks':[],'snaps':[],'encryption':{'type':'none'}
+    }, indent=2))" > "$RECIPE"
+
+    $SCP "$RECIPE" liveuser@127.0.0.1:/tmp/e2e-recipe.json
+    echo "==> Running fisherman install (takes several minutes)..."
+
+    # CONTAINERS_STORAGE_CONF redirects bootc + skopeo to the VFS store embedded
+    # in the squashfs at /usr/lib/bootc/storage (the payload image ref is
+    # localhost/ubuntu-26.04-desktop-bootc:latest in that store).
+    $SSH 'sudo bash -c "
+        printf '[storage]\ndriver = vfs\ngraphroot = /usr/lib/bootc/storage\nrunroot = /run/containers/storage\n' > /tmp/bootc-storage.conf
+        CONTAINERS_STORAGE_CONF=/tmp/bootc-storage.conf /usr/local/bin/fisherman /tmp/e2e-recipe.json
+    "'
+    echo "==> Install complete."
+
+    # Patch BLS loader entries so the installed system outputs to ttyS0.
+    # Mirrors the dakota-iso pattern; ensures the e2e-boot-installed step
+    # can read the serial log for the login prompt.
+    echo "==> Patching BLS entries for serial console..."
+    $SSH 'sudo bash -c "
+        set -euo pipefail
+        TMP=\$(mktemp -d)
+        trap \"umount \$TMP 2>/dev/null || true; rmdir \$TMP\" EXIT
+        mount /dev/vda1 \$TMP
+        COUNT=0
+        for entry in \$TMP/loader/entries/*.conf \$TMP/EFI/loader/entries/*.conf; do
+            [[ -f \"\$entry\" ]] || continue
+            if grep -q \"^options \" \"\$entry\" && ! grep -q \"console=ttyS0\" \"\$entry\"; then
+                sed -i \"s|^options .*|& console=tty0 console=ttyS0,115200|\" \"\$entry\"
+                (( COUNT++ ))
+            fi
+        done
+        echo \"Patched \$COUNT BLS entry/entries\"
+    "'
+
+    echo "==> Shutting down live QEMU..."
+    echo "system_powerdown" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-live}}" 2>/dev/null || true
+    sleep 8
+    echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-live}}" 2>/dev/null || true
+
+# Boot the installed disk (no ISO) in QEMU and wait for a login prompt.
+e2e-boot-installed target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    [[ -f "{{e2e-disk}}" ]] || { echo "No install disk — run e2e-install first" >&2; exit 1; }
+
+    QEMU=$(command -v /usr/libexec/qemu-kvm /usr/bin/qemu-kvm \
+               /usr/bin/qemu-system-x86_64 2>/dev/null | head -1)
+    [[ -z "$QEMU" ]] && { echo "qemu-kvm / qemu-system-x86_64 not found" >&2; exit 1; }
+
+    OVMF_CODE=""
+    for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+              /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd; do
+        [[ -f "$f" ]] && { OVMF_CODE="$f"; break; }
+    done
+    [[ -z "$OVMF_CODE" ]] && { echo "OVMF not found" >&2; exit 1; }
+    for f in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+              /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+        [[ -f "$f" ]] && { cp "$f" "{{e2e-ovmf-vars-installed}}"; break; }
+    done
+
+    echo "==> Booting installed disk: {{e2e-disk}}"
+    sudo "$QEMU" \
+        -machine q35 -cpu host -m 4096 -smp 2 -accel kvm \
+        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+        -drive "if=pflash,format=raw,file={{e2e-ovmf-vars-installed}}" \
+        -drive "if=none,id=disk,file={{e2e-disk}},format=qcow2" \
+        -device virtio-blk-pci,drive=disk \
+        -netdev user,id=net0 \
+        -device virtio-net-pci,netdev=net0 \
+        -monitor "unix:{{e2e-monitor-installed}},server,nowait" \
+        -serial "file:{{e2e-serial-installed}}" \
+        -display none \
+        -daemonize
+    echo "==> Installed QEMU started (monitor: {{e2e-monitor-installed}})"
+
+    TIMEOUT=300  # 5 min — no snaps to seed on the installed system
+    echo "==> Waiting for login prompt (timeout: ${TIMEOUT}s)..."
+    ELAPSED=0
+    while (( ELAPSED < TIMEOUT )); do
+        if grep -qE "login:" "{{e2e-serial-installed}}" 2>/dev/null; then
+            echo ""
+            echo "=== INSTALLED SYSTEM BOOT TEST PASSED (${ELAPSED}s) ==="
+            FAILS=$(grep -E '\[FAILED\] Failed to start|Kernel panic' \
+                "{{e2e-serial-installed}}" || true)
+            [[ -n "$FAILS" ]] && echo "WARNING — failures detected:" && echo "$FAILS"
+            echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null || true
+            exit 0
+        fi
+        sleep 3; (( ELAPSED += 3 ))
+        printf "."
+    done
+    echo ""
+    echo "=== INSTALLED SYSTEM BOOT TEST FAILED (timeout after ${TIMEOUT}s) ==="
+    echo "--- last 50 lines of serial ---"
+    tail -50 "{{e2e-serial-installed}}" 2>/dev/null || true
+    echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null || true
+    exit 1
