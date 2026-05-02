@@ -1,13 +1,31 @@
-# Ubuntu 26.04 live ISO — pre-seeded snaps
+# Ubuntu 26.04 live ISO — pre-seeded snap packages
 #
-# These are downloaded at ISO build time and placed into /var/lib/snapd/seed/
-# so snapd installs them offline during the first live-session boot.
-# tuna-installer copies the installed snapd state to the target system,
-# so the snaps are present on the installed system without re-downloading.
+# Mirrors the snap set shipped by the official Ubuntu 26.04 Desktop ISO.
+# Source: germinate output for ubuntu.resolute/desktop
+# https://people.canonical.com/~ubuntu-archive/germinate-output/ubuntu.resolute/desktop
 #
-# Base snaps (core22, core24) required by most apps are added automatically
-# by install-snaps.sh — list only the user-visible app snaps here.
+# Format: <snap-name>  <channel>
+# Channel is required — Ubuntu 26.04 uses per-snap ubuntu-26.04 tracks that
+# receive Ubuntu-curated updates rather than generic upstream stable.
 #
-# Format: one snap name per line; blank lines and # comments are ignored.
-firefox
-libreoffice
+# Excluded intentionally:
+#   snapd                    — managed by apt, not seeded as a snap
+#   ubuntu-desktop-bootstrap — Ubuntu's first-boot OOBE; we use gnome-initial-setup
+#   desktop-security-center  — AppArmor prompting UI; AppArmor is masked in live session
+#   prompting-client         — AppArmor prompting client; same reason
+
+# ── Platform / base snaps ─────────────────────────────────────────────────────
+# Required at runtime by app snaps; must be in the seed so apps can launch
+# without downloading content snaps after the live session starts.
+bare                       stable
+core24                     stable
+gnome-46-2404              stable/ubuntu-26.04
+gtk-common-themes          stable/ubuntu-26.04
+mesa-2404                  stable/ubuntu-26.04
+snapd-desktop-integration  stable/ubuntu-26.04
+
+# ── User-facing apps ──────────────────────────────────────────────────────────
+firefox            stable/ubuntu-26.04
+thunderbird        stable/ubuntu-26.04
+snap-store         2/stable/ubuntu-26.04
+firmware-updater   1/stable/ubuntu-26.04
