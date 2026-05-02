@@ -58,9 +58,7 @@ RUN --mount=type=cache,target=/var/cache/flatpak-dl,id=ubuntu2604-flatpak \
 # /var/lib/snapd/ tree to the installed system (fisherman PR #25), giving the
 # user pre-installed snaps without re-downloading on first boot.
 #
-# snapd is installed here (not in the base image) because the live squashfs
-# needs the seeding service.  `snap download` runs without a daemon.
+# `snap` is already in the base image via ubuntu-desktop-minimal; no apt-get
+# needed here (and apt-get cannot be used — see note above about dpkg).
 RUN --mount=type=cache,target=/var/cache/snap-dl,id=ubuntu2604-snap \
-    apt-get install -y --no-install-recommends snapd && \
-    chmod +x /tmp/src/install-snaps.sh && /tmp/src/install-snaps.sh && \
-    apt-get clean -y && rm -rf /var/lib/apt/lists/*
+    chmod +x /tmp/src/install-snaps.sh && /tmp/src/install-snaps.sh
