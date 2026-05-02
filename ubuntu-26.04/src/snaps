@@ -1,0 +1,13 @@
+# Ubuntu 26.04 live ISO — pre-seeded snaps
+#
+# These are downloaded at ISO build time and placed into /var/lib/snapd/seed/
+# so snapd installs them offline during the first live-session boot.
+# tuna-installer copies the installed snapd state to the target system,
+# so the snaps are present on the installed system without re-downloading.
+#
+# Base snaps (core22, core24) required by most apps are added automatically
+# by install-snaps.sh — list only the user-visible app snaps here.
+#
+# Format: one snap name per line; blank lines and # comments are ignored.
+firefox
+libreoffice

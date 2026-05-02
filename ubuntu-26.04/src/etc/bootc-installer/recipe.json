@@ -3,6 +3,7 @@
   "distro_name": "Ubuntu 26.04",
   "imgref": "ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest",
   "local_imgref": "containers-storage:ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest",
+  "snaps": ["firefox", "libreoffice"],
   "tour": {
     "welcome": {
       "title": "Installing Ubuntu 26.04",

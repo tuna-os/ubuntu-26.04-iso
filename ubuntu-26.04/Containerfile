@@ -51,3 +51,16 @@ ENV INSTALLER_CHANNEL=${INSTALLER_CHANNEL}
 # only deltas are downloaded on rebuild.  CI always starts cold.
 RUN --mount=type=cache,target=/var/cache/flatpak-dl,id=ubuntu2604-flatpak \
     chmod +x /tmp/src/install-flatpaks.sh && /tmp/src/install-flatpaks.sh
+
+# ── Snap pre-seed layer ────────────────────────────────────────────────────────
+# Download snap packages into /var/lib/snapd/seed/ so snapd installs them
+# offline on the first live-session boot.  tuna-installer then copies the full
+# /var/lib/snapd/ tree to the installed system (fisherman PR #25), giving the
+# user pre-installed snaps without re-downloading on first boot.
+#
+# snapd is installed here (not in the base image) because the live squashfs
+# needs the seeding service.  `snap download` runs without a daemon.
+RUN --mount=type=cache,target=/var/cache/snap-dl,id=ubuntu2604-snap \
+    apt-get install -y --no-install-recommends snapd && \
+    chmod +x /tmp/src/install-snaps.sh && /tmp/src/install-snaps.sh && \
+    apt-get clean -y && rm -rf /var/lib/apt/lists/*
