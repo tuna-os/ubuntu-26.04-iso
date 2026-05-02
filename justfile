@@ -19,6 +19,7 @@ compression := "fast"
 # Build the live installer container image.
 container target:
     podman build --cap-add sys_admin --security-opt label=disable \
+        --network=host \
         --layers \
         --build-arg DEBUG={{debug}} \
         --build-arg INSTALLER_CHANNEL={{installer_channel}} \
