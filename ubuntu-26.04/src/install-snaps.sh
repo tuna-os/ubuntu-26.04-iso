@@ -26,7 +26,7 @@ mkdir -p "${SNAP_CACHE}/tmp"
 export TMPDIR="${SNAP_CACHE}/tmp"
 
 # ── Restore build cache (warm start) ─────────────────────────────────────────
-cached=$(ls "$SNAP_CACHE/snaps/"*.snap 2>/dev/null | wc -l)
+cached=$(find "$SNAP_CACHE/snaps" -maxdepth 1 -name "*.snap" 2>/dev/null | wc -l)
 if [[ $cached -gt 0 ]]; then
     echo "==> Restoring $cached cached snap(s)..."
     cp "$SNAP_CACHE/snaps/"*.snap   "$SNAPS_DIR/" 2>/dev/null || true
@@ -40,7 +40,7 @@ download_snap() {
     local name="$1" channel="${2:-stable}"
 
     # Already present (any revision) — skip re-download.
-    if ls "$SNAPS_DIR/${name}_"*.snap 2>/dev/null | head -1 | grep -q .; then
+    if find "$SNAPS_DIR" -maxdepth 1 -name "${name}_*.snap" 2>/dev/null | grep -q .; then
         echo "  -> $name: already cached"
         return 0
     fi
