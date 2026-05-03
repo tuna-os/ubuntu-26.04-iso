@@ -512,8 +512,11 @@ e2e-install target:
     # in the squashfs at /usr/lib/bootc/storage (the payload image ref is
     # localhost/ubuntu-26.04-desktop-bootc:latest in that store).
     $SSH 'sudo bash -c "
-        printf '[storage]\ndriver = vfs\ngraphroot = /usr/lib/bootc/storage\nrunroot = /run/containers/storage\n' > /tmp/bootc-storage.conf
-        CONTAINERS_STORAGE_CONF=/tmp/bootc-storage.conf /usr/local/bin/fisherman /tmp/e2e-recipe.json
+        FISHERMAN=\$(find /var/lib/flatpak/app/org.bootcinstaller.Installer -name fisherman -type f 2>/dev/null | head -1)
+        [[ -z \"\$FISHERMAN\" ]] && FISHERMAN=/usr/local/bin/fisherman
+        echo \"Using fisherman: \$FISHERMAN\"
+        printf \'[storage]\\ndriver = vfs\\ngraphroot = /usr/lib/bootc/storage\\nrunroot = /run/containers/storage\\n\' > /tmp/bootc-storage.conf
+        CONTAINERS_STORAGE_CONF=/tmp/bootc-storage.conf \$FISHERMAN /tmp/e2e-recipe.json
     "'
     echo "==> Install complete."
 
