@@ -42,9 +42,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            just podman mtools xorriso isomd5sum squashfs-tools \
+            podman mtools xorriso isomd5sum squashfs-tools \
             qemu-system-x86 ovmf socat sshpass \
             python3 -qq
+
+      - name: Setup Just
+        uses: extractions/setup-just@v3
 
       - name: Enable KVM
         run: |
