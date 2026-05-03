@@ -18,6 +18,15 @@ compression := "fast"
 
 # Build the live installer container image.
 container target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    # On bootc-managed hosts /var/tmp may be read-only; override tmpdir for
+    # containers-storage via a custom storage.conf so podman can commit layers.
+    STORAGE_CONF=$(mktemp /tmp/iso-build-storage.XXXXXX.conf)
+    trap "rm -f '$STORAGE_CONF'" EXIT
+    printf '[storage]\ndriver = "overlay"\ngraphroot = "/var/lib/containers/storage"\nrunroot = "/run/containers/storage"\n\n[storage.options]\ntmpdir = "/var/home/james/iso-tmp"\n' \
+        > "$STORAGE_CONF"
+    TMPDIR=/tmp CONTAINERS_STORAGE_CONF="$STORAGE_CONF" \
     podman build --cap-add sys_admin --security-opt label=disable \
         --network=host \
         --layers \
@@ -58,6 +67,8 @@ build-bg target:
 iso-sd-boot target:
     #!/usr/bin/bash
     set -euo pipefail
+    # /var/tmp may have a broken inode on bootc-managed hosts; use a known-good path.
+    export TMPDIR=/var/home/james/iso-tmp
 
     just debug={{debug}} installer_channel={{installer_channel}} container {{target}}
     mkdir -p {{output_dir}}
@@ -89,25 +100,21 @@ iso-sd-boot target:
         CS_STAGING='${CS_STAGING}'
         SQUASHFS_ROOT='${SQUASHFS_ROOT}'
         SQUASHFS_STORAGE=\"\${CS_STAGING}/usr/lib/bootc/storage\"
-        LIVE_RUNROOT=\"\$(mktemp -d '${OUTPUT_DIR}'/live-runroot-XXXXXX)\"
-        STORAGE_CONF=\"\$(mktemp '${OUTPUT_DIR}'/live-storage-XXXXXX.conf)\"
         mkdir -p \"\${SQUASHFS_STORAGE}\"
-        printf '[storage]\ndriver = \"vfs\"\nrunroot = \"%s\"\ngraphroot = \"%s\"\n' \
-            \"\${LIVE_RUNROOT}\" \"\${SQUASHFS_STORAGE}\" > \"\${STORAGE_CONF}\"
 
         echo 'Exporting Ubuntu OCI image to archive...'
         skopeo copy \
             containers-storage:${PAYLOAD_REF} \
             oci-archive:\${PAYLOAD_OCI}:${PAYLOAD_REF}
 
-        echo 'Importing Ubuntu OCI image into squashfs bootc storage...'
-        CONTAINERS_STORAGE_CONF=\"\${STORAGE_CONF}\" \
+        # Copy payload as OCI layout — blobs stay compressed, ~4 GB not ~100 GB.
+        # In the live session, fisherman uses: "image": "oci:/usr/lib/bootc/storage"
+        echo 'Copying payload into squashfs as OCI layout...'
         skopeo copy \
             oci-archive:\${PAYLOAD_OCI}:${PAYLOAD_REF} \
-            containers-storage:${PAYLOAD_REF}
+            oci:\${SQUASHFS_STORAGE}
 
-        rm -f \"\${PAYLOAD_OCI}\" \"\${STORAGE_CONF}\"
-        rm -rf \"\${LIVE_RUNROOT}\"
+        rm -f \"\${PAYLOAD_OCI}\"
 
         echo 'Building unified squashfs source tree...'
         mkdir -p \"\${SQUASHFS_ROOT}\"
@@ -317,7 +324,10 @@ e2e-monitor-live        := "/tmp/ubuntu-26.04-e2e-live.sock"
 e2e-monitor-installed   := "/tmp/ubuntu-26.04-e2e-installed.sock"
 e2e-serial-live         := "/tmp/ubuntu-26.04-e2e-live.log"
 e2e-serial-installed    := "/tmp/ubuntu-26.04-e2e-installed.log"
-e2e-ssh-port            := "2222"
+e2e-ssh-port            := "2222"    # live session SSH (debug=1)
+e2e-ssh-installed-port  := "2223"    # installed system SSH
+e2e-test-user           := "tester"  # created by fisherman user field
+e2e-test-pass           := "tester"  # same value as in e2e-install.sh
 
 # Live boot smoke test — fast, no install needed, does not require debug=1.
 # Boots the ISO in headless QEMU and waits for the UBUNTU26_LIVE_READY marker
@@ -412,12 +422,15 @@ e2e-qemu target:
     just output_dir={{output_dir}} e2e-boot-live      {{target}}
     just output_dir={{output_dir}} e2e-install        {{target}}
     just output_dir={{output_dir}} e2e-boot-installed {{target}}
+    just                           e2e-verify-bootc   {{target}}
 
 # Boot the live ISO in QEMU (daemonized) with a blank install disk attached.
 # Waits for UBUNTU26_LIVE_READY marker then polls SSH until the session is ready.
 e2e-boot-live target:
     #!/usr/bin/bash
     set -euo pipefail
+    # sshpass may live in Linuxbrew on dev machines; not in root PATH under sudo
+    export PATH="/home/linuxbrew/.linuxbrew/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
     ISO="{{output_dir}}/{{target}}-live.iso"
     [[ -f "$ISO" ]] || { echo "No ISO — run: just debug=1 iso-sd-boot {{target}}" >&2; exit 1; }
 
@@ -436,7 +449,7 @@ e2e-boot-live target:
         [[ -f "$f" ]] && { cp "$f" "{{e2e-ovmf-vars-live}}"; break; }
     done
 
-    [[ -f "{{e2e-disk}}" ]] || qemu-img create -f qcow2 "{{e2e-disk}}" 20G
+    [[ -f "{{e2e-disk}}" ]] || qemu-img create -f qcow2 "{{e2e-disk}}" 30G
 
     echo "==> Booting live ISO: $ISO"
     sudo "$QEMU" \
@@ -471,15 +484,22 @@ e2e-boot-live target:
         printf "."
     done
 
-    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o LogLevel=ERROR -o ConnectTimeout=5 -o PreferredAuthentications=password"
-    echo "==> Waiting for SSH on port {{e2e-ssh-port}}..."
-    for i in $(seq 1 40); do
-        sshpass -p live ssh $SSH_OPTS liveuser@127.0.0.1 \
-            -p {{e2e-ssh-port}} true 2>/dev/null && { echo "SSH ready"; break; }
-        [[ "$i" -eq 40 ]] && { echo "ERROR: SSH timed out"; exit 1; }
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o PreferredAuthentications=password"
+    # Wait up to 10 min — snap seeding on the live session can take 5+ min.
+    # Use nc to gate on port open first so we don't waste retry budget on auth.
+    echo "==> Waiting for SSH on port {{e2e-ssh-port}} (up to 10 min)..."
+    SSH_READY=0
+    for i in $(seq 1 120); do
+        if nc -z 127.0.0.1 {{e2e-ssh-port}} 2>/dev/null; then
+            if sshpass -p live ssh $SSH_OPTS liveuser@127.0.0.1 -p {{e2e-ssh-port}} true 2>/dev/null; then
+                echo "    SSH ready (${i} × 5s = $((i*5))s after marker)"
+                SSH_READY=1
+                break
+            fi
+        fi
         sleep 5
     done
+    [[ $SSH_READY -eq 1 ]] || { echo "ERROR: SSH timed out after 10 min"; exit 1; }
 
 # Run fisherman install via SSH into the live QEMU VM, then shut down.
 # The bootc payload image lives at /usr/lib/bootc/storage in the squashfs
@@ -488,6 +508,7 @@ e2e-boot-live target:
 e2e-install target:
     #!/usr/bin/bash
     set -euo pipefail
+    export PATH="/home/linuxbrew/.linuxbrew/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
     SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -o LogLevel=ERROR -o ConnectTimeout=10 -o PreferredAuthentications=password \
               -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
@@ -495,31 +516,17 @@ e2e-install target:
     SCP="sshpass -p live scp $SSH_OPTS -P {{e2e-ssh-port}}"
 
     echo "==> Running fisherman install (takes several minutes)..."
-    # SCP the pre-written install script — writes its own recipe (xfs) and runs fisherman.
+    # SCP the install script and patched fisherman binary (has the oci: fix
+    # that makes composeFsBackend work with oci:/usr/lib/bootc/storage).
     $SCP "{{justfile_directory()}}/ubuntu-26.04/src/e2e-install.sh" \
         liveuser@127.0.0.1:/tmp/e2e-install.sh
+    [[ -f "/var/home/james/iso-output/fisherman-patched" ]] && \
+        $SCP "/var/home/james/iso-output/fisherman-patched" \
+             liveuser@127.0.0.1:/tmp/fisherman-patched || true
     $SSH 'sudo bash /tmp/e2e-install.sh'
     echo "==> Install complete."
 
-    # Patch BLS loader entries so the installed system outputs to ttyS0.
-    # Mirrors the dakota-iso pattern; ensures the e2e-boot-installed step
-    # can read the serial log for the login prompt.
-    echo "==> Patching BLS entries for serial console..."
-    $SSH 'sudo bash -c "
-        set -euo pipefail
-        TMP=\$(mktemp -d)
-        trap \"umount \$TMP 2>/dev/null || true; rmdir \$TMP\" EXIT
-        mount /dev/vda1 \$TMP
-        COUNT=0
-        for entry in \$TMP/loader/entries/*.conf \$TMP/EFI/loader/entries/*.conf; do
-            [[ -f \"\$entry\" ]] || continue
-            if grep -q \"^options \" \"\$entry\" && ! grep -q \"console=ttyS0\" \"\$entry\"; then
-                sed -i \"s|^options .*|& console=tty0 console=ttyS0,115200|\" \"\$entry\"
-                (( COUNT++ ))
-            fi
-        done
-        echo \"Patched \$COUNT BLS entry/entries\"
-    "'
+    # BLS entries are patched by e2e-install.sh (for any missing console kargs).
 
     echo "==> Shutting down live QEMU..."
     echo "system_powerdown" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-live}}" 2>/dev/null || true
@@ -527,6 +534,8 @@ e2e-install target:
     echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-live}}" 2>/dev/null || true
 
 # Boot the installed disk (no ISO) in QEMU and wait for a login prompt.
+# Boot the installed disk in QEMU (daemonized). Waits for login: on the serial
+# console then returns — QEMU keeps running so e2e-verify-bootc can SSH in.
 e2e-boot-installed target:
     #!/usr/bin/bash
     set -euo pipefail
@@ -554,33 +563,79 @@ e2e-boot-installed target:
         -drive "if=pflash,format=raw,file={{e2e-ovmf-vars-installed}}" \
         -drive "if=none,id=disk,file={{e2e-disk}},format=qcow2" \
         -device virtio-blk-pci,drive=disk \
-        -netdev user,id=net0 \
+        -netdev "user,id=net0,hostfwd=tcp::{{e2e-ssh-installed-port}}-:22" \
         -device virtio-net-pci,netdev=net0 \
         -monitor "unix:{{e2e-monitor-installed}},server,nowait" \
         -serial "file:{{e2e-serial-installed}}" \
         -display none \
         -daemonize
-    echo "==> Installed QEMU started (monitor: {{e2e-monitor-installed}})"
+    echo "==> Installed QEMU started (SSH :{{e2e-ssh-installed-port}}, monitor: {{e2e-monitor-installed}})"
 
-    TIMEOUT=300  # 5 min — no snaps to seed on the installed system
-    echo "==> Waiting for login prompt (timeout: ${TIMEOUT}s)..."
+    # Wait for BOOTC_STATUS_END — emitted by bootc-status-report.service on first boot
+    TIMEOUT=420
+    echo "==> Waiting for BOOTC_STATUS_END in serial log (timeout: ${TIMEOUT}s)..."
     ELAPSED=0
     while (( ELAPSED < TIMEOUT )); do
-        if grep -qE "login:" "{{e2e-serial-installed}}" 2>/dev/null; then
+        if sudo grep -q "BOOTC_STATUS_END" "{{e2e-serial-installed}}" 2>/dev/null; then
             echo ""
-            echo "=== INSTALLED SYSTEM BOOT TEST PASSED (${ELAPSED}s) ==="
-            FAILS=$(grep -E '\[FAILED\] Failed to start|Kernel panic' \
+            echo "    bootc-status-report.service completed after ${ELAPSED}s."
+            FAILS=$(sudo grep -E '\[FAILED\] Failed to start|Kernel panic' \
                 "{{e2e-serial-installed}}" || true)
-            [[ -n "$FAILS" ]] && echo "WARNING — failures detected:" && echo "$FAILS"
-            echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null || true
+            [[ -n "$FAILS" ]] && echo "WARNING — failures:" && echo "$FAILS"
             exit 0
         fi
         sleep 3; (( ELAPSED += 3 ))
         printf "."
     done
     echo ""
-    echo "=== INSTALLED SYSTEM BOOT TEST FAILED (timeout after ${TIMEOUT}s) ==="
-    echo "--- last 50 lines of serial ---"
-    tail -50 "{{e2e-serial-installed}}" 2>/dev/null || true
-    echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null || true
-    exit 1
+    echo "FAILED: BOOTC_STATUS_END not seen after ${TIMEOUT}s"
+    sudo tail -50 "{{e2e-serial-installed}}" 2>/dev/null || true
+    echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null |# Extract bootc status from the serial log (written by bootc-status-report.service),
+# verify the deployment, then gracefully shut down the installed QEMU.
+e2e-verify-bootc target:
+    #!/usr/bin/bash
+    set -euo pipefail
+    echo "==> Extracting bootc status from serial log..."
+    SERIAL="{{e2e-serial-installed}}"
+
+    # Extract the JSON between the markers.
+    # Kernel log lines look like: [  52.050412] sh[2309]: {json...}
+    # Strip the timestamp+pid prefix then find the JSON object.
+    BOOTC_JSON=$(sudo awk '/BOOTC_STATUS_BEGIN/{p=1;next}/BOOTC_STATUS_END/{p=0}p' \
+        "$SERIAL" 2>/dev/null \
+        | tr -d '\r' \
+        | sed 's/^\[[ 0-9.]*\] [a-zA-Z0-9_@:.-]*\[.*\]: //' \
+        | grep '^{' | head -1)
+
+    if [[ -z "$BOOTC_JSON" ]]; then
+        echo "ERROR: no bootc status JSON found in serial log"
+        echo "--- last 50 lines of serial ---"
+        sudo tail -50 "$SERIAL" 2>/dev/null || true
+        echo "quit" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null || true
+        exit 1
+    fi
+
+    echo ""
+    echo "=== bootc status (from serial log) ==="
+    echo "$BOOTC_JSON" | python3 -m json.tool 2>/dev/null || echo "$BOOTC_JSON"
+    echo ""
+
+    VERIFY="{{justfile_directory()}}/ubuntu-26.04/src/verify-bootc-status.py"
+    if echo "$BOOTC_JSON" | python3 "$VERIFY"; then
+        EXIT_CODE=0
+    else
+        EXIT_CODE=1
+    fi
+
+    echo ""
+    echo "==> Shutting down installed QEMU..."
+    echo "system_powerdown" | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null || true
+    sleep 8
+    echo "quit"           | sudo socat - "UNIX-CONNECT:{{e2e-monitor-installed}}" 2>/dev/null || true
+
+    if [[ $EXIT_CODE -eq 0 ]]; then
+        echo "=== e2e PASSED: installed system booted and bootc status verified ==="
+    else
+        echo "=== e2e FAILED: bootc status verification did not pass ==="
+    fi
+    exit $EXIT_CODE
