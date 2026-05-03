@@ -27,7 +27,7 @@ jobs:
   e2e:
     name: ISO End-to-End
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -53,16 +53,16 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Log in to GHCR (for base image pull)
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            podman login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Checkout ubuntu-26.04-desktop-bootc
+        uses: actions/checkout@v4
+        with:
+          repository: tuna-os/ubuntu-26.04-desktop-bootc
+          path: bootc-image
 
-      - name: Pull base bootc image
+      - name: Build base bootc image
         run: |
-          sudo podman pull ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest
-          sudo podman tag  ghcr.io/hanthor/ubuntu-26.04-desktop-bootc:latest \
-                           localhost/ubuntu-26.04-desktop-bootc:latest
+          cd bootc-image
+          sudo $(which just) build
 
       - name: Build debug ISO
         id: build
