@@ -402,16 +402,16 @@ e2e target:
                "{{e2e-ovmf-vars-live}}" "{{e2e-ovmf-vars-installed}}" \
                "{{e2e-monitor-live}}" "{{e2e-monitor-installed}}" \
                "{{e2e-serial-live}}" "{{e2e-serial-installed}}"
-    just e2e-qemu {{target}}
+    just output_dir={{output_dir}} e2e-qemu {{target}}
 
 # Run the QEMU e2e test against an already-built ISO (skips the rebuild).
 # Expects the ISO at {{output_dir}}/{{target}}-live.iso.
 e2e-qemu target:
     #!/usr/bin/bash
     set -euo pipefail
-    just e2e-boot-live      {{target}}
-    just e2e-install        {{target}}
-    just e2e-boot-installed {{target}}
+    just output_dir={{output_dir}} e2e-boot-live      {{target}}
+    just output_dir={{output_dir}} e2e-install        {{target}}
+    just output_dir={{output_dir}} e2e-boot-installed {{target}}
 
 # Boot the live ISO in QEMU (daemonized) with a blank install disk attached.
 # Waits for UBUNTU26_LIVE_READY marker then polls SSH until the session is ready.
