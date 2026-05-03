@@ -494,20 +494,8 @@ e2e-install target:
     SSH="sshpass -p live ssh $SSH_OPTS liveuser@127.0.0.1 -p {{e2e-ssh-port}}"
     SCP="sshpass -p live scp $SSH_OPTS -P {{e2e-ssh-port}}"
 
-    # Write the fisherman recipe locally, then SCP it in
-    RECIPE=$(mktemp /tmp/ubuntu-e2e-recipe.XXXXXX.json)
-    trap "rm -f '$RECIPE'" EXIT
-    python3 -c "import json; print(json.dumps({
-        'disk':'/dev/vda','filesystem':'ext4','composeFsBackend':True,
-        'bootloader':'systemd','selinuxDisabled':True,'unifiedStorage':False,
-        'hostname':'ubuntu-e2e-test',
-        'image':'localhost/ubuntu-26.04-desktop-bootc:latest',
-        'flatpaks':[],'snaps':[],'encryption':{'type':'none'}
-    }, indent=2))" > "$RECIPE"
-
-    $SCP "$RECIPE" liveuser@127.0.0.1:/tmp/e2e-recipe.json
     echo "==> Running fisherman install (takes several minutes)..."
-    # SCP the pre-written install script from the repo — no inline quoting needed.
+    # SCP the pre-written install script — writes its own recipe (xfs) and runs fisherman.
     $SCP "{{justfile_directory()}}/ubuntu-26.04/src/e2e-install.sh" \
         liveuser@127.0.0.1:/tmp/e2e-install.sh
     $SSH 'sudo bash /tmp/e2e-install.sh'

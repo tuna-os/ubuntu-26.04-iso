@@ -21,4 +21,21 @@ graphroot = /usr/lib/bootc/storage
 runroot = /run/containers/storage
 EOF
 
+# Write the fisherman recipe. Filesystem must be xfs, btrfs, or zfs —
+# ext4 is not supported by the fisherman installer.
+cat > /tmp/e2e-recipe.json << 'EOF'
+{
+  "disk":             "/dev/vda",
+  "filesystem":       "xfs",
+  "composeFsBackend": true,
+  "bootloader":       "systemd",
+  "selinuxDisabled":  true,
+  "unifiedStorage":   false,
+  "hostname":         "ubuntu-e2e-test",
+  "image":            "localhost/ubuntu-26.04-desktop-bootc:latest",
+  "flatpaks":         [],
+  "encryption":       {"type": "none"}
+}
+EOF
+
 CONTAINERS_STORAGE_CONF=/tmp/bootc-storage.conf "$FISHERMAN" /tmp/e2e-recipe.json
