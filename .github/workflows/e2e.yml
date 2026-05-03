@@ -56,7 +56,7 @@ jobs:
       - name: Checkout ubuntu-26.04-desktop-bootc
         uses: actions/checkout@v4
         with:
-          repository: tuna-os/ubuntu-26.04-desktop-bootc
+          repository: hanthor/ubuntu-26.04-desktop-bootc
           path: bootc-image
 
       - name: Build base bootc image
