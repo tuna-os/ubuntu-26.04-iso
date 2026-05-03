@@ -71,7 +71,7 @@ jobs:
         id: build
         run: |
           START=$(date +%s)
-          sudo just debug=1 output_dir=/var/tmp/iso-output compression=fast \
+          sudo $(which just) debug=1 output_dir=/var/tmp/iso-output compression=fast \
             iso-sd-boot ubuntu-26.04
           echo "duration=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
           ISO=/var/tmp/iso-output/ubuntu-26.04-live.iso
@@ -82,7 +82,7 @@ jobs:
         id: live_boot
         run: |
           START=$(date +%s)
-          sudo just output_dir=/var/tmp/iso-output test-live ubuntu-26.04
+          sudo $(which just) output_dir=/var/tmp/iso-output test-live ubuntu-26.04
           echo "duration=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
 
       - name: Full install end-to-end
@@ -90,7 +90,7 @@ jobs:
         run: |
           START=$(date +%s)
           # e2e-qemu runs against the already-built ISO (no rebuild)
-          sudo just \
+          sudo $(which just) \
             output_dir=/var/tmp/iso-output \
             e2e-qemu ubuntu-26.04
           echo "duration=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
