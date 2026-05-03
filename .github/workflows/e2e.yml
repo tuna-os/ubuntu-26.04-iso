@@ -93,6 +93,10 @@ jobs:
           echo "duration=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
+      - name: Fix serial log permissions
+        if: always()
+        run: sudo chmod a+r /tmp/ubuntu-26.04-e2e-*.log 2>/dev/null || true
+
       - name: Upload serial logs
         if: always()
         continue-on-error: true

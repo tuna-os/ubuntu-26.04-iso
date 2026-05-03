@@ -507,17 +507,10 @@ e2e-install target:
 
     $SCP "$RECIPE" liveuser@127.0.0.1:/tmp/e2e-recipe.json
     echo "==> Running fisherman install (takes several minutes)..."
-
-    # CONTAINERS_STORAGE_CONF redirects bootc + skopeo to the VFS store embedded
-    # in the squashfs at /usr/lib/bootc/storage (the payload image ref is
-    # localhost/ubuntu-26.04-desktop-bootc:latest in that store).
-    $SSH 'sudo bash -c "
-        FISHERMAN=\$(find /var/lib/flatpak/app/org.bootcinstaller.Installer -name fisherman -type f 2>/dev/null | head -1)
-        [[ -z \"\$FISHERMAN\" ]] && FISHERMAN=/usr/local/bin/fisherman
-        echo \"Using fisherman: \$FISHERMAN\"
-        printf \'[storage]\\ndriver = vfs\\ngraphroot = /usr/lib/bootc/storage\\nrunroot = /run/containers/storage\\n\' > /tmp/bootc-storage.conf
-        CONTAINERS_STORAGE_CONF=/tmp/bootc-storage.conf \$FISHERMAN /tmp/e2e-recipe.json
-    "'
+    # SCP the pre-written install script from the repo — no inline quoting needed.
+    $SCP "{{justfile_directory()}}/ubuntu-26.04/src/e2e-install.sh" \
+        liveuser@127.0.0.1:/tmp/e2e-install.sh
+    $SSH 'sudo bash /tmp/e2e-install.sh'
     echo "==> Install complete."
 
     # Patch BLS loader entries so the installed system outputs to ttyS0.
